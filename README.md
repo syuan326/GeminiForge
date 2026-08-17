@@ -22,15 +22,26 @@
 
 进入仓库 **Settings** → **Secrets and variables** → **Actions**，添加以下密钥：
 
-#### 必填配置
+#### 必填配置（mailfree 方式）
+
+| Secret | 说明 | 示例 |
+|--------|------|------|
+| `MAILFREE_URL` | mailfree 临时邮箱服务地址 | `https://mail.example.com` |
+| `MAILFREE_TOKEN` | mailfree 的 JWT_TOKEN 根管理员令牌 | `your_jwt_token` |
+| `EMAIL_DOMAIN` | 注册的邮箱域名（可选，多域名时自动选择） | `mail.example.com` |
+| `MAILFREE_DOMAIN_INDEX` | 使用 mailfree 第几个域名，默认 `0`（可选） | `0` |
+| `SYNC_URL` | 同步 API 地址 | `https://xxx.hf.space` |
+| `SYNC_KEY` | 同步 API 密钥 | `your_api_key` |
+
+#### 旧版邮箱接口（可选，二选一）
+
+如果不用 mailfree，仍可使用原来的 worker 邮箱接口：
 
 | Secret | 说明 | 示例 |
 |--------|------|------|
 | `WORKER_DOMAIN` | 邮箱 Worker 域名（后端Worker） | `email.example.com` |
 | `EMAIL_DOMAIN` | 注册的邮箱域名 | `mail.example.com` |
 | `ADMIN_PASSWORD` | 邮箱管理密码 | `your_password` |
-| `SYNC_URL` | 同步 API 地址 | `https://xxx.hf.space` |
-| `SYNC_KEY` | 同步 API 密钥 | `your_api_key` |
 
 #### 代理配置（可选）
 

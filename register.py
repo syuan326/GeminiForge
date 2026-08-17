@@ -4,9 +4,12 @@ GeminiForge (原 gtgm) - Gemini Business 账号注册机
 专为GitHub Actions无头环境设计，使用Playwright替代DrissionPage
 
 环境变量配置:
-  - WORKER_DOMAIN: 邮箱Worker域名
-  - EMAIL_DOMAIN: 邮箱域名  
-  - ADMIN_PASSWORD: 管理密码
+  - MAILFREE_URL: mailfree 临时邮箱服务地址（如 https://mail.example.com）
+  - MAILFREE_TOKEN: mailfree 的 JWT_TOKEN 根管理员令牌
+  - EMAIL_DOMAIN: 邮箱域名（可选，用于在 mailfree 多域名中选择）
+  - MAILFREE_DOMAIN_INDEX: 使用 mailfree 第几个域名 (默认0)
+  - WORKER_DOMAIN: 旧版邮箱 Worker 域名（兼容旧接口，可选）
+  - ADMIN_PASSWORD: 旧版邮箱管理密码（兼容旧接口，可选）
   - SYNC_URL: 同步API地址
   - SYNC_KEY: 同步API密钥
   - REGISTER_COUNT: 注册数量 (默认1)
@@ -69,100 +72,228 @@ class CredentialData:
 
 
 class EmailManager:
-    """邮箱管理器"""
-    
-    def __init__(self, worker_domain: str, email_domain: str, admin_password: str):
-        self.worker_domain = worker_domain
-        self.email_domain = email_domain
-        self.admin_password = admin_password
-        
+    """邮箱管理器（支持 mailfree API，也兼容旧的 worker admin API）"""
+
+    def __init__(self, worker_domain: str = '', email_domain: str = '', admin_password: str = '',
+                 mailfree_url: str = '', mailfree_token: str = '', mailfree_domain_index: str = None):
+        self.worker_domain = worker_domain or ''
+        self.email_domain = email_domain or ''
+        self.admin_password = admin_password or ''
+        self.mailfree_url = (mailfree_url or '').strip().rstrip('/')
+        if self.mailfree_url and '://' not in self.mailfree_url:
+            self.mailfree_url = 'https://' + self.mailfree_url
+        self.mailfree_token = mailfree_token or ''
+        try:
+            index_source = mailfree_domain_index
+            if index_source is None or str(index_source).strip() == '':
+                index_source = os.environ.get('MAILFREE_DOMAIN_INDEX', '0')
+            self.domain_index = int(str(index_source).strip() or '0')
+        except ValueError:
+            self.domain_index = 0
+
         # 配置Session
         self.session = requests.Session()
         adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5)
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
         self.session.headers.update({'Connection': 'keep-alive'})
-    
+
     def _update_proxy(self):
         """动态更新代理设置（仅在PROXY_EMAIL=true时启用）"""
         # 邮件API默认不走代理，除非明确设置PROXY_EMAIL=true
         use_proxy_for_email = os.environ.get('PROXY_EMAIL', '').lower() == 'true'
         if not use_proxy_for_email:
             return  # 邮件API不使用代理
-        
+
         proxy = os.environ.get('PROXY', '') or PROXY
         if proxy and not self.session.proxies:
             self.session.proxies = {'http': proxy, 'https': proxy}
             logger.info(f"EmailManager 使用代理: {proxy[:30]}...")
-    
+
+    def _mailfree_headers(self) -> dict:
+        """构造 mailfree 的根管理员请求头"""
+        headers = {"Content-Type": "application/json"}
+        if self.mailfree_token:
+            headers["Authorization"] = f"Bearer {self.mailfree_token}"
+        return headers
+
+    def _mailfree_domain_index(self) -> int:
+        """根据 EMAIL_DOMAIN 自动选择 mailfree 域名索引"""
+        if not self.email_domain:
+            return self.domain_index
+        try:
+            res = self.session.get(
+                f"{self.mailfree_url}/api/domains",
+                headers=self._mailfree_headers(),
+                timeout=30
+            )
+            if res.status_code == 200:
+                domains = res.json()
+                if isinstance(domains, list):
+                    for idx, domain in enumerate(domains):
+                        if str(domain).strip().lower() == self.email_domain.strip().lower():
+                            return idx
+                    logger.warning(f"mailfree 域名列表中没有 {self.email_domain}，使用 index={self.domain_index}")
+        except Exception as e:
+            logger.warning(f"获取 mailfree 域名列表失败: {e}")
+        return self.domain_index
+
     def create_email(self, max_retries: int = 3) -> tuple:
-        """创建邮箱"""
+        """创建邮箱，返回 (jwt_or_none, email)"""
         import string
-        
+
         # 动态更新代理设置
         self._update_proxy()
-        
+
         letters1 = ''.join(random.choices(string.ascii_lowercase, k=4))
         numbers = ''.join(random.choices(string.digits, k=2))
         letters2 = ''.join(random.choices(string.ascii_lowercase, k=3))
         username = letters1 + numbers + letters2
-        
+
+        # 优先使用 mailfree
+        if self.mailfree_url:
+            url = f"{self.mailfree_url}/api/create"
+            headers = self._mailfree_headers()
+            payload = {
+                "local": username,
+                "domainIndex": self._mailfree_domain_index(),
+            }
+
+            for attempt in range(max_retries):
+                try:
+                    res = self.session.post(url, json=payload, headers=headers, timeout=30)
+                    if res.status_code == 200:
+                        data = res.json()
+                        email = data.get('email', '')
+                        if not email:
+                            raise Exception("mailfree 返回中没有 email 字段")
+                        logger.info(f"邮箱创建成功 (mailfree): {email}")
+                        return None, email
+                    else:
+                        logger.warning(f"mailfree 创建邮箱失败 HTTP {res.status_code}: {res.text[:200]}")
+                except Exception as e:
+                    wait_time = (2 ** attempt) + 1
+                    logger.warning(f"创建邮箱失败 ({attempt + 1}/{max_retries}): {e}")
+                    time.sleep(wait_time)
+            return None, None
+
+        # 兼容旧的 worker admin API
         url = f"https://{self.worker_domain}/admin/new_address"
         headers = {"Content-Type": "application/json", "x-admin-auth": self.admin_password}
         payload = {"enablePrefix": True, "name": username, "domain": self.email_domain}
-        
+
         for attempt in range(max_retries):
             try:
                 res = self.session.post(url, json=payload, headers=headers, timeout=30)
                 if res.status_code == 200:
                     data = res.json()
                     email = data.get('address', f"{username}@{self.email_domain}")
-                    logger.info(f"邮箱创建成功: {email}")
+                    logger.info(f"邮箱创建成功 (旧版): {email}")
                     return data.get('jwt', ''), email
             except Exception as e:
                 wait_time = (2 ** attempt) + 1
                 logger.warning(f"创建邮箱失败 ({attempt + 1}/{max_retries}): {e}")
                 time.sleep(wait_time)
-        
+
         return None, None
-    
+
     def check_verification_code(self, email: str, max_retries: int = 20) -> Optional[str]:
         """检查验证码"""
         # 动态更新代理设置
         self._update_proxy()
-        
+
         for i in range(max_retries):
             try:
-                url = f"https://{self.worker_domain}/admin/mails"
-                headers = {"x-admin-auth": self.admin_password}
-                params = {"limit": 5, "offset": 0, "address": email}
-                
-                res = self.session.get(url, params=params, headers=headers, timeout=30)
-                if res.status_code == 200:
-                    data = res.json()
-                    if data.get('results') and len(data['results']) > 0:
-                        raw_content = data['results'][0].get('raw', '')
-                        cleaned = raw_content.replace('=\r\n', '').replace('=\n', '').replace('=3D', '=')
-                        
-                        patterns = [
-                            r'verification-code[^>]*>([A-Z0-9]{6})<',
-                            r'>([A-Z0-9]{6})</span>',
-                            r'\b([A-Z0-9]{6})\b',
-                        ]
-                        for pattern in patterns:
-                            match = re.search(pattern, cleaned, re.IGNORECASE)
-                            if match:
-                                code = match.group(1).upper()
-                                if len(code) == 6 and code.isalnum():
-                                    logger.info(f"获取到验证码: {code}")
-                                    return code
-                
+                # 优先使用 mailfree
+                if self.mailfree_url:
+                    code = self._check_verification_code_mailfree(email)
+                    if code:
+                        return code
+                else:
+                    code = self._check_verification_code_legacy(email)
+                    if code:
+                        return code
+
                 logger.info(f"等待验证码... ({i+1}/{max_retries})")
                 time.sleep(3)
             except Exception as e:
                 logger.warning(f"检查验证码错误: {e}")
                 time.sleep(3)
-        
+
+        return None
+
+    def _check_verification_code_mailfree(self, email: str) -> Optional[str]:
+        """通过 mailfree /api/emails 获取验证码"""
+        url = f"{self.mailfree_url}/api/emails"
+        params = {"mailbox": email, "limit": 20}
+        headers = self._mailfree_headers()
+
+        res = self.session.get(url, params=params, headers=headers, timeout=30)
+        if res.status_code != 200:
+            logger.warning(f"mailfree 获取邮件失败 HTTP {res.status_code}: {res.text[:200]}")
+            return None
+
+        emails = res.json()
+        if not isinstance(emails, list) or not emails:
+            return None
+
+        patterns = [
+            r'verification-code[^>]*>([A-Z0-9]{6})<',
+            r'>([A-Z0-9]{6})</span>',
+            r'([A-Z0-9]{6})',
+        ]
+
+        for mail in emails:
+            # mailfree 已自动提取 verification_code
+            code = str(mail.get('verification_code') or '').strip()
+            if code:
+                code = code.upper()
+                if len(code) == 6 and code.isalnum():
+                    logger.info(f"获取到验证码 (mailfree): {code}")
+                    return code
+
+            # 如果没提取到，再尝试从主题/预览里解析
+            text = f"{mail.get('subject', '')} {mail.get('preview', '')}"
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    code = match.group(1).upper()
+                    if len(code) == 6 and code.isalnum():
+                        logger.info(f"获取到验证码 (mailfree 解析): {code}")
+                        return code
+
+        return None
+
+    def _check_verification_code_legacy(self, email: str) -> Optional[str]:
+        """兼容旧版 worker admin 邮件接口"""
+        url = f"https://{self.worker_domain}/admin/mails"
+        headers = {"x-admin-auth": self.admin_password}
+        params = {"limit": 5, "offset": 0, "address": email}
+
+        res = self.session.get(url, params=params, headers=headers, timeout=30)
+        if res.status_code != 200:
+            return None
+
+        data = res.json()
+        if not data.get('results') or len(data['results']) == 0:
+            return None
+
+        raw_content = data['results'][0].get('raw', '')
+        cleaned = raw_content.replace('=\r\n', '').replace('=\n', '').replace('=3D', '=')
+
+        patterns = [
+            r'verification-code[^>]*>([A-Z0-9]{6})<',
+            r'>([A-Z0-9]{6})</span>',
+            r'\b([A-Z0-9]{6})\b',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, cleaned, re.IGNORECASE)
+            if match:
+                code = match.group(1).upper()
+                if len(code) == 6 and code.isalnum():
+                    logger.info(f"获取到验证码 (旧版): {code}")
+                    return code
+
         return None
 
 
@@ -173,9 +304,12 @@ class GeminiRegistrar:
         self.email_config = email_config
         self.credential = CredentialData()
         self.email_manager = EmailManager(
-            email_config['worker_domain'],
-            email_config['email_domain'],
-            email_config['admin_password']
+            email_config.get('worker_domain', ''),
+            email_config.get('email_domain', ''),
+            email_config.get('admin_password', ''),
+            email_config.get('mailfree_url', ''),
+            email_config.get('mailfree_token', ''),
+            email_config.get('mailfree_domain_index', '0'),
         )
         self.browser = None
         self.page = None
@@ -402,9 +536,12 @@ async def main():
     
     # 从环境变量读取配置
     email_config = {
-        'worker_domain': os.environ.get('WORKER_DOMAIN', ''),
+        'mailfree_url': os.environ.get('MAILFREE_URL', ''),
+        'mailfree_token': os.environ.get('MAILFREE_TOKEN', ''),
         'email_domain': os.environ.get('EMAIL_DOMAIN', ''),
-        'admin_password': os.environ.get('ADMIN_PASSWORD', '')
+        'mailfree_domain_index': os.environ.get('MAILFREE_DOMAIN_INDEX', '0'),
+        'worker_domain': os.environ.get('WORKER_DOMAIN', ''),
+        'admin_password': os.environ.get('ADMIN_PASSWORD', ''),
     }
     
     sync_url = os.environ.get('SYNC_URL', '')
@@ -412,9 +549,13 @@ async def main():
     count = int(os.environ.get('REGISTER_COUNT', '1'))
     concurrent = int(os.environ.get('CONCURRENT', '1'))
     
-    # 验证配置
-    if not all([email_config['worker_domain'], email_config['email_domain'], email_config['admin_password']]):
-        logger.error("❌ 缺少邮箱配置环境变量!")
+    # 验证配置（mailfree 或旧版 worker 邮箱二选一）
+    mailfree_ready = bool(email_config['mailfree_url'] and email_config['mailfree_token'])
+    legacy_ready = bool(
+        email_config['worker_domain'] and email_config['email_domain'] and email_config['admin_password']
+    )
+    if not mailfree_ready and not legacy_ready:
+        logger.error("❌ 缺少邮箱配置环境变量! 需要 MAILFREE_URL+MAILFREE_TOKEN，或旧版 WORKER_DOMAIN+EMAIL_DOMAIN+ADMIN_PASSWORD")
         sys.exit(1)
     
     if not sync_url or not sync_key:

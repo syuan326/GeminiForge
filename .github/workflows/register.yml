@@ -18,8 +18,11 @@ on:
     - cron: '0 */6 * * *'
 
 env:
-  WORKER_DOMAIN: ${{ secrets.WORKER_DOMAIN }}
+  MAILFREE_URL: ${{ secrets.MAILFREE_URL }}
+  MAILFREE_TOKEN: ${{ secrets.MAILFREE_TOKEN }}
   EMAIL_DOMAIN: ${{ secrets.EMAIL_DOMAIN }}
+  MAILFREE_DOMAIN_INDEX: ${{ secrets.MAILFREE_DOMAIN_INDEX }}
+  WORKER_DOMAIN: ${{ secrets.WORKER_DOMAIN }}
   ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
   SYNC_URL: ${{ secrets.SYNC_URL }}
   SYNC_KEY: ${{ secrets.SYNC_KEY }}
