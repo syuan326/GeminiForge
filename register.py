@@ -338,13 +338,22 @@ class GeminiRegistrar:
                     # 解析代理地址
                     from urllib.parse import urlparse
                     proxy_parsed = urlparse(browser_proxy)
+                    proxy_scheme = (proxy_parsed.scheme or 'http').lower()
+                    proxy_host = proxy_parsed.hostname or ''
+                    proxy_port = proxy_parsed.port or 80
+                    if proxy_scheme.startswith('socks5'):
+                        proxy_server = f"socks5://{proxy_host}:{proxy_port}"
+                    elif proxy_scheme.startswith('socks4'):
+                        proxy_server = f"socks4://{proxy_host}:{proxy_port}"
+                    else:
+                        proxy_server = f"http://{proxy_host}:{proxy_port}"
                     # Playwright 需要的格式
-                    proxy_config = {'server': f"http://{proxy_parsed.hostname}:{proxy_parsed.port}"}
+                    proxy_config = {'server': proxy_server}
                     if proxy_parsed.username:
                         proxy_config['username'] = proxy_parsed.username
                         proxy_config['password'] = proxy_parsed.password or ''
                     launch_args['proxy'] = proxy_config
-                    logger.info(f"浏览器使用代理: {proxy_parsed.hostname}:{proxy_parsed.port}")
+                    logger.info(f"浏览器使用代理: {proxy_host}:{proxy_port} ({proxy_scheme})")
                 
                 self.browser = await p.chromium.launch(**launch_args)
                 context = await self.browser.new_context(
@@ -353,13 +362,17 @@ class GeminiRegistrar:
                 )
                 self.page = await context.new_page()
                 
-                # 3. 打开注册页面
+                # 3. 打开注册页面（避免 networkidle 一直等不到，改用 domcontentloaded + 重试）
                 logger.info("正在打开注册页面...")
-                await self.page.goto('https://business.gemini.google', wait_until='networkidle')
-                
+                try:
+                    await self.page.goto('https://business.gemini.google', wait_until='domcontentloaded', timeout=60000)
+                except Exception as goto_err:
+                    logger.warning(f"首次打开页面失败，正在重试: {goto_err}")
+                    await self.page.goto('https://business.gemini.google', wait_until='load', timeout=60000)
+
                 # 4. 输入邮箱
                 logger.info(f"正在输入邮箱: {email}")
-                await self.page.wait_for_selector('#email-input', timeout=30000)
+                await self.page.wait_for_selector('#email-input', timeout=60000)
                 await self.page.fill('#email-input', email)
                 await asyncio.sleep(1)
                 
