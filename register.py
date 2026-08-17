@@ -314,6 +314,24 @@ class GeminiRegistrar:
         self.browser = None
         self.page = None
     
+    def _verify_proxy(self, proxy: str) -> None:
+        """浏览器启动前先用 requests 快速验证代理能否访问 Google"""
+        if not proxy:
+            return
+        test_url = 'https://business.gemini.google/'
+        logger.info("正在测试代理连通性...")
+        try:
+            res = requests.get(
+                test_url,
+                proxies={'http': proxy, 'https': proxy},
+                timeout=15,
+                allow_redirects=False,
+            )
+            logger.info(f"代理连通性测试通过: HTTP {res.status_code}")
+        except Exception as e:
+            logger.error(f"代理连通性测试失败: {e}")
+            raise Exception(f"代理无法访问 {test_url}: {e}")
+
     async def register(self) -> bool:
         """执行注册流程"""
         from playwright.async_api import async_playwright
@@ -334,6 +352,8 @@ class GeminiRegistrar:
                 
                 # 从环境变量读取代理（VLESS启动后会设置）
                 browser_proxy = os.environ.get('PROXY', '') or PROXY
+                # 先验证代理连通性，避免 Playwright 空等 60 秒
+                self._verify_proxy(browser_proxy)
                 if browser_proxy:
                     # 解析代理地址
                     from urllib.parse import urlparse
