@@ -378,21 +378,25 @@ class GeminiRegistrar:
                 self.browser = await p.chromium.launch(**launch_args)
                 context = await self.browser.new_context(
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-                    viewport={'width': 1920, 'height': 1080}
+                    viewport={'width': 1920, 'height': 1080},
+                    ignore_https_errors=True,
+                    service_workers='block',
                 )
                 self.page = await context.new_page()
+                self.page.set_default_navigation_timeout(120000)
+                self.page.set_default_timeout(90000)
                 
-                # 3. 打开注册页面（避免 networkidle 一直等不到，改用 domcontentloaded + 重试）
+                # 3. 打开注册页面（优先 commit，避免子资源把 navigation 卡住）
                 logger.info("正在打开注册页面...")
                 try:
-                    await self.page.goto('https://business.gemini.google', wait_until='domcontentloaded', timeout=60000)
+                    await self.page.goto('https://business.gemini.google', wait_until='commit', timeout=120000)
                 except Exception as goto_err:
                     logger.warning(f"首次打开页面失败，正在重试: {goto_err}")
-                    await self.page.goto('https://business.gemini.google', wait_until='load', timeout=60000)
+                    await self.page.goto('https://business.gemini.google', wait_until='domcontentloaded', timeout=120000)
 
                 # 4. 输入邮箱
                 logger.info(f"正在输入邮箱: {email}")
-                await self.page.wait_for_selector('#email-input', timeout=60000)
+                await self.page.wait_for_selector('#email-input', timeout=90000)
                 await self.page.fill('#email-input', email)
                 await asyncio.sleep(1)
                 
